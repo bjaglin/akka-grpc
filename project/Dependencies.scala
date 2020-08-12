@@ -21,7 +21,7 @@ object Dependencies {
     val akkaHttp = "10.1.12"
     val akkaHttpBinary = "10.1"
 
-    val grpc = "1.30.0" // checked synced by GrpcVersionSyncCheckPlugin
+    val grpc = "1.30.2" // checked synced by GrpcVersionSyncCheckPlugin
 
     val scalaTest = "3.1.1"
 
@@ -123,5 +123,6 @@ object Dependencies {
         // usually automatically added by `suggestedDependencies`, which doesn't work with ReflectiveCodeGen
         Compile.grpcStub,
         Compile.akkaHttpCors,
-        Test.scalaTest)
+        Test.scalaTest,
+        Test.scalaTestPlusJunit)
 }

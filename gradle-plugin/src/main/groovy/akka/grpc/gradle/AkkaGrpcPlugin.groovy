@@ -1,171 +1,177 @@
 package akka.grpc.gradle
 
-
-import com.google.protobuf.gradle.Utils
+import com.google.protobuf.gradle.ProtobufPlugin
 import org.apache.commons.lang.SystemUtils
 import org.gradle.api.GradleException
 import org.gradle.api.Plugin
 import org.gradle.api.Project
-import org.gradle.api.artifacts.DependencyResolutionListener
-import org.gradle.api.artifacts.ResolvableDependencies
+import org.gradle.api.plugins.JavaPlugin
+import org.gradle.api.plugins.scala.ScalaPlugin
+import org.gradle.util.GradleVersion
+import org.gradle.util.VersionNumber
 
 import java.nio.file.Files
 import java.nio.file.Path
 
-class AkkaGrpcPlugin implements Plugin<Project>, DependencyResolutionListener {
+import static akka.grpc.gradle.AkkaGrpcPluginExtension.*
 
-    final String pluginVersion = AkkaGrpcPlugin.class.package.implementationVersion
-
-    final String protocVersion = "3.4.0"
-    final String grpcVersion = "1.30.0" // checked synced by GrpcVersionSyncCheckPlugin
+class AkkaGrpcPlugin implements Plugin<Project> {
 
     Project project
 
     @Override
     void apply(Project project) {
-        if (Utils.compareGradleVersion(project, "5.6") < 0) {
-            throw new GradleException(
-                    "Gradle version is ${project.gradle.gradleVersion}. Minimum supported version is 5.6")
+
+        if (VersionNumber.parse(GradleVersion.current().version) < VersionNumber.parse("5.6")) {
+            throw new GradleException("Gradle version is ${GradleVersion.current().version}. Minimum supported version is 5.6")
         }
 
         this.project = project
-        project.gradle.addListener(this)
+        def akkaGrpcExt = project.extensions.create('akkaGrpc', AkkaGrpcPluginExtension, project)
 
-        def extension = project.extensions.create('akkaGrpc', AkkaGrpcPluginExtension, project)
+        if (akkaGrpcExt.scala) {
+            project.pluginManager.apply ScalaPlugin
+        } else {
+            project.pluginManager.apply JavaPlugin
+        }
+
+        project.pluginManager.apply ProtobufPlugin
+
+        // workaround for test projects, when one only neesd to tests a new plugin version without rebuilding dependencies.
+        def baselineVersion = System.getProperty("akka.grpc.baseline.version", akkaGrpcExt.pluginVersion)
+
+        project.repositories {
+            mavenCentral()
+            if (VersionNumber.parse(baselineVersion).qualifier) {
+                maven {
+                    url "https://dl.bintray.com/akka/snapshots"
+                }
+            }
+        }
+
         String assemblySuffix = SystemUtils.IS_OS_WINDOWS ? "bat" : "jar"
         String assemblyClassifier = SystemUtils.IS_OS_WINDOWS ? "bat" : "assembly"
 
         Path logFile = project.buildDir.toPath().resolve("akka-grpc-gradle-plugin.log")
 
-        project.configure(project) {
-            boolean isScala = "${extension.language}".toLowerCase() == "scala"
-            boolean isJava = "${extension.language}".toLowerCase() == "java"
-
-            apply plugin: 'com.google.protobuf'
-            protobuf {
-                protoc {
-                    // Get protobuf from maven central instead of
-                    // using the installed version:
-                    artifact = "com.google.protobuf:protoc:${protocVersion}"
-                }
-
-                plugins {
-                    akkaGrpc {
-                        artifact = "com.lightbend.akka.grpc:akka-grpc-codegen_2.12:${pluginVersion}:${assemblyClassifier}@${assemblySuffix}"
-                    }
-                    if (isScala) {
-                        scalapb {
-                            artifact = "com.lightbend.akka.grpc:akka-grpc-scalapb-protoc-plugin_2.12:${pluginVersion}:${assemblyClassifier}@${assemblySuffix}"
-                        }
-                    }
-                }
-                sourceSets {
-                    main {
-                        proto {
-                            srcDir 'src/main/protobuf'
-                            srcDir 'src/main/proto'
-                            // Play conventions:
-                            srcDir 'app/protobuf'
-                            srcDir 'app/proto'
-                        }
-                    }
-                }
-
-                sourceSets {
-                    main {
-                        if (isScala) {
-                            scala {
-                                srcDir 'build/generated/source/proto/main/akkaGrpc'
-                                srcDir 'build/generated/source/proto/main/scalapb'
-                            }
-                        }
-                        if (isJava) {
-                            java {
-                                srcDir 'build/generated/source/proto/main/akkaGrpc'
-                                srcDir 'build/generated/source/proto/main/java'
-                            }
-                        }
-                    }
-                }
-
-                generateProtoTasks {
-                    all().each { task ->
-                        if (isScala) {
-                            task.builtins {
-                                remove java
-                            }
-                        }
-
-                        task.plugins {
-                            akkaGrpc {
-                                option "language=${extension.language}"
-                                option "generate_client=${extension.generateClient}"
-                                option "generate_server=${extension.generateServer}"
-                                option "server_power_apis=${extension.serverPowerApis}"
-                                option "use_play_actions=${extension.usePlayActions}"
-                                option "extra_generators=${extension.extraGenerators.join(';')}"
-                                option "logfile=${project.projectDir.toPath().relativize(logFile).toString()}"
-                                if (extension.generatePlay) {
-                                    option "generate_play=true"
-                                }
-                                if (isScala) {
-                                    option "flat_package"
-                                }
-                            }
-                            if (isScala) {
-                                scalapb {
-                                    option "flat_package"
-                                }
-                            }
-                        }
-                    }
+        project.sourceSets {
+            main {
+                proto {
+                    srcDir 'src/main/protobuf'
+                    srcDir 'src/main/proto'
+                    // Play conventions:
+                    srcDir 'app/protobuf'
+                    srcDir 'app/proto'
                 }
             }
-
-            project.task("printProtocLogs") {
-                doLast {
-                    Files.lines(logFile).forEach { line ->
-                        if (line.startsWith("[info]")) logger.info(line.substring(7))
-                        else if (line.startsWith("[debug]")) logger.debug(line.substring(7))
-                        else if (line.startsWith("[warn]")) logger.warn(line.substring(6))
-                        else if (line.startsWith("[error]")) logger.error(line.substring(7))
-                    }
-                }
-            }
-            project.getTasks().getByName("compileJava").dependsOn("printProtocLogs")
         }
+
+        project.sourceSets {
+            main {
+                if (akkaGrpcExt.scala) {
+                    scala {
+                        srcDir 'build/generated/source/proto/main/akkaGrpc'
+                        srcDir 'build/generated/source/proto/main/scalapb'
+                    }
+                } else {
+                    java {
+                        srcDir 'build/generated/source/proto/main/akkaGrpc'
+                        srcDir 'build/generated/source/proto/main/java'
+                    }
+                }
+            }
+            //TODO add test sources
+        }
+
+        project.protobuf {
+            protoc {
+                // Get protobuf from maven central instead of
+                // using the installed version:
+                artifact = "com.google.protobuf:protoc:${PROTOC_VERSION}"
+            }
+            plugins {
+                akkaGrpc {
+                    artifact = "com.lightbend.akka.grpc:akka-grpc-codegen_$PROTOC_PLUGIN_SCALA_VERSION:${baselineVersion}:${assemblyClassifier}@${assemblySuffix}"
+                }
+                if (akkaGrpcExt.scala) {
+                    scalapb {
+                        artifact = "com.lightbend.akka.grpc:akka-grpc-scalapb-protoc-plugin_$PROTOC_PLUGIN_SCALA_VERSION:${baselineVersion}:${assemblyClassifier}@${assemblySuffix}"
+                    }
+                }
+            }
+            generateProtoTasks {
+                all().each { task ->
+                    if (akkaGrpcExt.scala) {
+                        task.builtins {
+                            remove java
+                        }
+                    }
+
+                    task.plugins {
+                        akkaGrpc {
+                            option "language=${akkaGrpcExt.scala ? "Scala" : "Java"}"
+                            option "generate_client=${akkaGrpcExt.generateClient}"
+                            option "generate_server=${akkaGrpcExt.generateServer}"
+                            option "server_power_apis=${akkaGrpcExt.serverPowerApis}"
+                            option "use_play_actions=${akkaGrpcExt.usePlayActions}"
+                            option "extra_generators=${akkaGrpcExt.extraGenerators.join(';')}"
+                            option "logfile=${project.projectDir.toPath().relativize(logFile).toString()}"
+                            if (akkaGrpcExt.generatePlay) {
+                                option "generate_play=true"
+                            }
+                            if (akkaGrpcExt.scala) {
+                                option "flat_package"
+                            }
+                        }
+                        if (akkaGrpcExt.scala) {
+                            scalapb {
+                                option "flat_package"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        project.afterEvaluate { Project p ->
+
+            if (p.sourceSets.main.allJava.isEmpty()) {
+                p.tasks.getByName("compileJava").enabled = false
+            }
+
+            def scalaVersion = autodetectScala()
+            p.dependencies {
+                implementation "com.lightbend.akka.grpc:akka-grpc-runtime_${scalaVersion}:${baselineVersion}"
+                implementation "io.grpc:grpc-stub:${GRPC_VERSION}"
+            }
+        }
+
+        project.task("printProtocLogs") {
+            doLast {
+                Files.lines(logFile).forEach { line ->
+                    if (line.startsWith("[info]")) logger.info(line.substring(7))
+                    else if (line.startsWith("[debug]")) logger.debug(line.substring(7))
+                    else if (line.startsWith("[warn]")) logger.warn(line.substring(6))
+                    else if (line.startsWith("[error]")) logger.error(line.substring(7))
+                }
+            }
+        }
+        project.getTasks().getByName("compileJava").dependsOn("printProtocLogs") //TODO logs for multi project builds
+
     }
 
+    String autodetectScala() {
+        def cfg = project.configurations.compileClasspath.copyRecursive()
 
-    @Override
-    void beforeResolve(ResolvableDependencies resolvableDependencies) {
-        def compileDeps = project.getConfigurations().getByName("compile").getDependencies()
-        compileDeps.add(project.getDependencies().create("com.lightbend.akka.grpc:akka-grpc-runtime_2.12:${pluginVersion}"))
-        // TODO #115 grpc-stub is only needed for the client. Can we use the 'suggestedDependencies' somehow?
-        compileDeps.add(project.getDependencies().create("io.grpc:grpc-stub:${grpcVersion}"))
-        project.gradle.removeListener(this)
-    }
+        def scalaVersions = cfg.incoming.resolutionResult.allDependencies
+            .findAll { it.requested.moduleIdentifier.name == 'scala-library' }
+            .collect { it.requested.versionConstraint.toString() }.collect { it.split("\\.").init().join(".") }.unique()
 
-    @Override
-    void afterResolve(ResolvableDependencies resolvableDependencies) {
+        if (scalaVersions.size() != 1) {
+            throw new GradleException("$PLUGIN_CODE requires a single major.minor version of `org.scala-lang:scala-library` in compileClasspath.\nFound $scalaVersions")
+        }
 
+        scalaVersions.first()
     }
 }
 
-class AkkaGrpcPluginExtension {
-
-    String language
-    boolean generateClient = true
-    boolean generateServer = true
-    boolean generatePlay = false
-    boolean serverPowerApis = false
-    boolean usePlayActions = false
-    List<String> extraGenerators = [ ]
-
-    AkkaGrpcPluginExtension(Project project) {
-        if (project.plugins.hasPlugin("scala"))
-            language = "Scala"
-        else
-            language = "Java"
-    }
-}
